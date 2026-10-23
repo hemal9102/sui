@@ -321,10 +321,11 @@ pub struct KvRpcServer {
     pub(crate) request_bigtable_concurrency: usize,
     pub(crate) monotonic_read_wait_timeout: Duration,
     pub(crate) stages: StagesConfig,
-    // `at_checkpoint` object reads need the alpha
+    // `at_checkpoint` object reads, and every `ListObjectVersions` request
+    // (bounded by `at_checkpoint` or the served height), need the alpha
     // [`OBJECT_VERSIONS_BY_CHECKPOINT_PIPELINE`], backfilled from genesis (see
     // [`KvRpcConfig::enable_object_at_checkpoint`]). Instances without it
-    // reject those reads with `Unimplemented`.
+    // reject those requests with `Unimplemented`.
     object_at_checkpoint_enabled: bool,
     // `max_version` object reads need the alpha [`OBJECT_TOMBSTONES_PIPELINE`],
     // backfilled from genesis (see [`KvRpcConfig::enable_object_max_version`]).
