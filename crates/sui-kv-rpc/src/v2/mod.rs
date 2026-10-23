@@ -605,6 +605,7 @@ mod tests {
                 StagesConfig::default(),
                 WatermarkSource::IndexerStreams(vec![]),
                 false,
+                false,
             )
             .await
             .expect("create kv-rpc server");

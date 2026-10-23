@@ -20,6 +20,7 @@ use sui_kvstore::EPOCH_END_PIPELINE;
 use sui_kvstore::EPOCH_START_PIPELINE;
 use sui_kvstore::EVENT_BITMAP_INDEX_PIPELINE;
 use sui_kvstore::KeyValueStoreReader;
+use sui_kvstore::OBJECT_TOMBSTONES_PIPELINE;
 use sui_kvstore::OBJECT_VERSIONS_BY_CHECKPOINT_PIPELINE;
 use sui_kvstore::OBJECTS_PIPELINE;
 use sui_kvstore::PACKAGES_BY_ID_PIPELINE;
@@ -325,6 +326,10 @@ pub struct KvRpcServer {
     // [`KvRpcConfig::enable_object_at_checkpoint`]). Instances without it
     // reject those reads with `Unimplemented`.
     object_at_checkpoint_enabled: bool,
+    // `max_version` object reads need the alpha [`OBJECT_TOMBSTONES_PIPELINE`],
+    // backfilled from genesis (see [`KvRpcConfig::enable_object_max_version`]).
+    // Instances without it reject those reads with `Unimplemented`.
+    object_max_version_enabled: bool,
 }
 
 /// Answers whether a replica is ready for traffic, for its `/health` endpoint.
@@ -472,6 +477,7 @@ impl KvRpcServer {
         stages: StagesConfig,
         watermark_source: WatermarkSource,
         enable_object_at_checkpoint: bool,
+        enable_object_max_version: bool,
     ) -> anyhow::Result<Self> {
         ledger_history.validate()?;
         let mut client = BigTableClient::new_remote_with_credentials(
@@ -502,6 +508,7 @@ impl KvRpcServer {
             chain_id,
             server_version,
             enable_object_at_checkpoint,
+            enable_object_max_version,
             metrics,
             ledger_history,
             request_bigtable_concurrency,
@@ -527,6 +534,7 @@ impl KvRpcServer {
             StagesConfig::default(),
             WatermarkSource::Bigtable,
             false,
+            false,
         )
         .await
     }
@@ -545,6 +553,7 @@ impl KvRpcServer {
         stages: StagesConfig,
         watermark_source: WatermarkSource,
         enable_object_at_checkpoint: bool,
+        enable_object_max_version: bool,
     ) -> anyhow::Result<Self> {
         let client = BigTableClient::new_local(host, instance_id).await?;
         // Emulator/test path: metrics are inert (no scrape endpoint), but the
@@ -555,6 +564,7 @@ impl KvRpcServer {
             ChainIdentifier::from(sui_types::digests::CheckpointDigest::default()),
             server_version,
             enable_object_at_checkpoint,
+            enable_object_max_version,
             metrics,
             ledger_history,
             request_bigtable_concurrency,
@@ -569,6 +579,7 @@ impl KvRpcServer {
         chain_id: ChainIdentifier,
         server_version: Option<ServerVersion>,
         enable_object_at_checkpoint: bool,
+        enable_object_max_version: bool,
         metrics: Arc<KvRpcMetrics>,
         ledger_history: LedgerHistoryConfig,
         request_bigtable_concurrency: usize,
@@ -591,6 +602,7 @@ impl KvRpcServer {
             server_version,
             service_info_watermark_pipelines: service_info_watermark_pipelines(
                 enable_object_at_checkpoint,
+                enable_object_max_version,
             ),
             cache,
             watermark_source,
@@ -601,6 +613,7 @@ impl KvRpcServer {
             monotonic_read_wait_timeout,
             stages,
             object_at_checkpoint_enabled: enable_object_at_checkpoint,
+            object_max_version_enabled: enable_object_max_version,
         };
 
         if server.watermark_source == WatermarkSource::Bigtable {
@@ -730,12 +743,19 @@ impl KvRpcServer {
 /// Pipelines whose watermarks bound the checkpoint height reported by
 /// `GetServiceInfo`: the always-served set, plus the List API pipelines, plus
 /// [`OBJECT_VERSIONS_BY_CHECKPOINT_PIPELINE`] when `at_checkpoint` object reads
-/// are enabled.
-pub fn service_info_watermark_pipelines(enable_object_at_checkpoint: bool) -> Vec<&'static str> {
+/// are enabled, plus [`OBJECT_TOMBSTONES_PIPELINE`] when `max_version` object
+/// reads are enabled.
+pub fn service_info_watermark_pipelines(
+    enable_object_at_checkpoint: bool,
+    enable_object_max_version: bool,
+) -> Vec<&'static str> {
     let mut pipelines = DEFAULT_SERVICE_INFO_WATERMARK_PIPELINES.to_vec();
     pipelines.extend_from_slice(&LIST_API_SERVICE_INFO_WATERMARK_PIPELINES);
     if enable_object_at_checkpoint {
         pipelines.push(OBJECT_VERSIONS_BY_CHECKPOINT_PIPELINE);
+    }
+    if enable_object_max_version {
+        pipelines.push(OBJECT_TOMBSTONES_PIPELINE);
     }
     pipelines
 }
@@ -779,7 +799,7 @@ mod tests {
     /// Write a watermark row for every served pipeline, at the checkpoint `checkpoint_of` names
     /// for it.
     async fn seed_watermarks(client: &mut BigTableClient, checkpoint_of: impl Fn(&str) -> u64) {
-        for pipeline in service_info_watermark_pipelines(false) {
+        for pipeline in service_info_watermark_pipelines(false, false) {
             let checkpoint = checkpoint_of(pipeline);
             client
                 .create_pipeline_watermark_if_absent(

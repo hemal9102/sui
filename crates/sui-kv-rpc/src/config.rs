@@ -616,8 +616,9 @@ pub struct KvRpcConfig {
     pub bigtable_http2_connection_window_bytes: Option<u32>,
 
     /// Deprecated and ignored: the `GetServiceInfo` watermark set always
-    /// includes the List API pipelines, adds the object versions index when
-    /// `enable-object-at-checkpoint` is on, and cannot be chosen per pipeline.
+    /// includes the List API pipelines, adds the object indexes when
+    /// `enable-object-at-checkpoint` or `enable-object-max-version` is on, and
+    /// cannot be chosen per pipeline.
     /// Still parsed so existing config files keep loading.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub watermark_pipeline: Option<Vec<String>>,
@@ -639,6 +640,24 @@ pub struct KvRpcConfig {
     /// `Unavailable`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub enable_object_at_checkpoint: Option<bool>,
+
+    /// Serve `GetObject` and `BatchGetObjects` requests that set `max_version`, and fold the
+    /// alpha `kvstore_object_tombstones` pipeline into the `GetServiceInfo` checkpoint height.
+    /// Defaults to `false`, which rejects those requests with `Unimplemented`. A request that
+    /// sets both `max_version` and `at_checkpoint` also needs `enable-object-at-checkpoint`.
+    ///
+    /// Enable this only after `kvstore_object_tombstones` has been backfilled from genesis. A
+    /// `max_version` read stops at the tombstone written where the object was deleted or
+    /// wrapped; without it, the read resolves to the object's last live version before the
+    /// removal instead of `NotFound`. As with `enable-object-at-checkpoint`, the server cannot
+    /// check this, and setting this flag is the operator's statement that the backfill is
+    /// complete.
+    ///
+    /// If this is on but the pipeline is not running, the pipeline has no watermark, the
+    /// `GetServiceInfo` height cannot be computed, and every request on this replica fails with
+    /// `Unavailable`, as with `enable-object-at-checkpoint`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub enable_object_max_version: Option<bool>,
 
     /// Tunables for the ledger-history list APIs.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -748,6 +767,10 @@ impl KvRpcConfig {
 
     pub fn enable_object_at_checkpoint(&self) -> bool {
         self.enable_object_at_checkpoint.unwrap_or(false)
+    }
+
+    pub fn enable_object_max_version(&self) -> bool {
+        self.enable_object_max_version.unwrap_or(false)
     }
 
     /// TLS identity, when both cert and key are set and non-empty.
@@ -1172,7 +1195,10 @@ render-ahead = 3
     #[test]
     fn watermark_set_always_includes_the_list_api_pipelines() {
         let cfg = KvRpcConfig::default();
-        let pipelines = service_info_watermark_pipelines(cfg.enable_object_at_checkpoint());
+        let pipelines = service_info_watermark_pipelines(
+            cfg.enable_object_at_checkpoint(),
+            cfg.enable_object_max_version(),
+        );
         for name in LIST_API_SERVICE_INFO_WATERMARK_PIPELINES {
             assert!(pipelines.contains(&name), "{name} must bound the height");
         }
@@ -1184,7 +1210,7 @@ render-ahead = 3
         let cfg = KvRpcConfig::default();
         assert!(!cfg.enable_object_at_checkpoint());
         assert!(
-            !service_info_watermark_pipelines(cfg.enable_object_at_checkpoint())
+            !service_info_watermark_pipelines(cfg.enable_object_at_checkpoint(), false)
                 .contains(&sui_kvstore::OBJECT_VERSIONS_BY_CHECKPOINT_PIPELINE)
         );
 
@@ -1192,9 +1218,28 @@ render-ahead = 3
         let cfg: KvRpcConfig = serde_yaml::from_str(yaml).unwrap();
         assert!(cfg.enable_object_at_checkpoint());
         assert!(
-            service_info_watermark_pipelines(cfg.enable_object_at_checkpoint())
+            service_info_watermark_pipelines(cfg.enable_object_at_checkpoint(), false)
                 .contains(&sui_kvstore::OBJECT_VERSIONS_BY_CHECKPOINT_PIPELINE),
             "the object versions index must bound the height",
+        );
+    }
+
+    #[test]
+    fn object_max_version_off_by_default_and_bounds_the_watermark_set() {
+        let cfg = KvRpcConfig::default();
+        assert!(!cfg.enable_object_max_version());
+        assert!(
+            !service_info_watermark_pipelines(false, cfg.enable_object_max_version())
+                .contains(&sui_kvstore::OBJECT_TOMBSTONES_PIPELINE)
+        );
+
+        let yaml = "enable-object-max-version: true\n";
+        let cfg: KvRpcConfig = serde_yaml::from_str(yaml).unwrap();
+        assert!(cfg.enable_object_max_version());
+        assert!(
+            service_info_watermark_pipelines(false, cfg.enable_object_max_version())
+                .contains(&sui_kvstore::OBJECT_TOMBSTONES_PIPELINE),
+            "the object tombstones must bound the height",
         );
     }
 
@@ -1213,7 +1258,11 @@ enable-experimental-query-apis: false
         let cfg: KvRpcConfig = serde_yaml::from_str(yaml).expect("stale key must not hard-fail");
         cfg.validate().unwrap();
         assert_eq!(
-            service_info_watermark_pipelines(cfg.enable_object_at_checkpoint()).len(),
+            service_info_watermark_pipelines(
+                cfg.enable_object_at_checkpoint(),
+                cfg.enable_object_max_version(),
+            )
+            .len(),
             DEFAULT_SERVICE_INFO_WATERMARK_PIPELINES.len()
                 + LIST_API_SERVICE_INFO_WATERMARK_PIPELINES.len(),
         );

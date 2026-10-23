@@ -64,7 +64,8 @@ struct App {
     app_profile_id: Option<String>,
     /// (deprecated, ignored) Pipeline watermark to include in GetServiceInfo
     /// checkpoint height. The set always includes the List API pipelines, plus
-    /// the object versions index when `enable-object-at-checkpoint` is on.
+    /// the object indexes when `enable-object-at-checkpoint` or
+    /// `enable-object-max-version` is on.
     #[clap(
         long = "watermark-pipeline",
         value_name = "PIPELINE",
@@ -158,7 +159,7 @@ fn apply_deprecated_overrides(app: App, config: &mut KvRpcConfig) {
             pipelines = ?ignored_pipelines,
             "`watermark-pipeline` is deprecated and ignored; the GetServiceInfo \
              watermark set always includes the List API pipelines, plus the object \
-             versions index when `enable-object-at-checkpoint` is on"
+             indexes when `enable-object-at-checkpoint` or `enable-object-max-version` is on"
         );
     }
 }
@@ -228,6 +229,7 @@ async fn main() -> Result<()> {
         config.stages(),
         config.watermark_source(),
         config.enable_object_at_checkpoint(),
+        config.enable_object_max_version(),
     )
     .await?;
 

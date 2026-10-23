@@ -218,7 +218,7 @@ mod tests {
     /// A watermark for every pipeline a replica serves, at the checkpoint `checkpoint` picks for
     /// it.
     fn served_watermarks(checkpoint: impl Fn(&str) -> u64) -> HashMap<String, CommitterWatermark> {
-        service_info_watermark_pipelines(false)
+        service_info_watermark_pipelines(false, false)
             .iter()
             .map(|&pipeline| (pipeline.to_string(), watermark(checkpoint(pipeline))))
             .collect()
@@ -280,6 +280,7 @@ mod tests {
             StagesConfig::default(),
             WatermarkSource::IndexerStreams(indexer_urls),
             false,
+            false,
         )
         .await
         .expect("create kv-rpc server");
@@ -297,7 +298,7 @@ mod tests {
         let mut client = BigTableClient::new_local(bigtable.to_string(), "test".to_string())
             .await
             .expect("connect to mock Bigtable");
-        for pipeline in service_info_watermark_pipelines(false) {
+        for pipeline in service_info_watermark_pipelines(false, false) {
             client
                 .create_pipeline_watermark_if_absent(
                     pipeline,
