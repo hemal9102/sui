@@ -402,8 +402,9 @@ impl ObjectNotFoundError {
         }
     }
 
-    /// Bound a `version` or `max_version` read by `checkpoint`: the version it selected was not
-    /// found, or was written after `checkpoint`.
+    /// Bound a `version` or `max_version` read by `checkpoint`: the exact version was not found or
+    /// was written after `checkpoint`, or the object had no version at or below `max_version`
+    /// written by `checkpoint`, or was deleted or wrapped at the newest one.
     pub fn visible_at_checkpoint(
         self,
         checkpoint: sui_sdk_types::CheckpointSequenceNumber,

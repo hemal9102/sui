@@ -36,8 +36,8 @@ pub enum ObjectSelector {
         at_checkpoint: Option<u64>,
     },
     /// The newest version at or below `max_version`, unless the object was deleted or wrapped at
-    /// that version. With `at_checkpoint`, only if that version was written at or before the
-    /// checkpoint; an older version that was is not returned instead.
+    /// that version. With `at_checkpoint`, the newest such version among those written at or
+    /// before the checkpoint, so versions written after it never change the answer.
     MaxVersion {
         max_version: u64,
         at_checkpoint: Option<u64>,
@@ -61,7 +61,7 @@ impl ObjectSelector {
     }
 
     /// The checkpoint a [`Self::Version`] or [`Self::MaxVersion`] read is bounded by: the
-    /// version it selects is found only if it was written at or before this checkpoint.
+    /// version it returns was written at or before this checkpoint.
     pub fn visibility_bound(&self) -> Option<u64> {
         match *self {
             Self::Version { at_checkpoint, .. } | Self::MaxVersion { at_checkpoint, .. } => {
@@ -300,27 +300,49 @@ fn get_object_impl(
     }
     let object = match selector {
         ObjectSelector::Latest => reader.inner().get_object(&id),
-        ObjectSelector::Version { version, .. } => {
-            reader.inner().get_object_by_key(&id, version.into())
+        ObjectSelector::Version {
+            version,
+            at_checkpoint,
+        } => {
+            let version = version.into();
+            // A version above the object's version at the end of the checkpoint was written
+            // after it.
+            let visible = match at_checkpoint {
+                None => true,
+                Some(checkpoint) => reader
+                    .get_object_version_at_checkpoint(id, checkpoint, upper_bound()?)?
+                    .is_some_and(|version_at_checkpoint| version <= version_at_checkpoint),
+            };
+            if visible {
+                reader.inner().get_object_by_key(&id, version)
+            } else {
+                None
+            }
         }
-        ObjectSelector::MaxVersion { max_version, .. } => reader
-            .inner()
-            .get_object_lt_or_eq_version(&id, max_version.into())?,
+        ObjectSelector::MaxVersion {
+            max_version,
+            at_checkpoint,
+        } => {
+            let max_version = max_version.into();
+            // The newest version at or below both `max_version` and the object's version at the
+            // end of the checkpoint is the newest version at or below `max_version` written by
+            // then.
+            let scan_from = match at_checkpoint {
+                None => Some(max_version),
+                Some(checkpoint) => reader
+                    .get_object_version_at_checkpoint(id, checkpoint, upper_bound()?)?
+                    .map(|version_at_checkpoint| version_at_checkpoint.min(max_version)),
+            };
+            match scan_from {
+                Some(version) => reader.inner().get_object_lt_or_eq_version(&id, version)?,
+                None => None,
+            }
+        }
         ObjectSelector::AtCheckpoint(checkpoint) => {
             reader.get_object_at_checkpoint(id, checkpoint, upper_bound()?)?
         }
     }
     .ok_or_else(not_found)?;
-    if let Some(checkpoint) = selector.visibility_bound()
-        && !reader.is_object_version_visible_at_checkpoint(
-            id,
-            object.version(),
-            checkpoint,
-            upper_bound()?,
-        )?
-    {
-        return Err(not_found());
-    }
 
     Ok(service.render_object_to_proto(&object, read_mask, &ObjectSet::default()))
 }

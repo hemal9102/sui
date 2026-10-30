@@ -217,8 +217,8 @@ async fn batch_get_objects() {
 /// that checkpoint, through creation, mutation, wrapping, unwrapping, and deletion, and at a
 /// checkpoint in which the live object did not change. `max_version` reads see the newest
 /// version at or below the bound, and `NotFound` from a deletion or wrap until the object is
-/// unwrapped. `at_checkpoint` with `version` or `max_version` keeps the selected version only
-/// if it was written by the end of the checkpoint.
+/// unwrapped. `at_checkpoint` with `version` keeps that version only if it was written by the
+/// end of the checkpoint, and with `max_version` selects among the versions written by then.
 #[sim_test]
 async fn get_object_lifecycle() {
     let cluster = TestClusterBuilder::new()
@@ -377,7 +377,12 @@ async fn get_object_lifecycle() {
                     bounded(exact, at_checkpoint),
                     format!("Object {address} with version {version}{at} not found"),
                 ));
-                let at_most = changes_of(id).rfind(|(_, _, changed, _)| *changed <= version);
+                // The newest change at or below `version` among those made by the bound.
+                let at_most = changes_of(id)
+                    .filter(|&&(changed_at, ..)| {
+                        at_checkpoint.is_none_or(|bound| changed_at <= bound)
+                    })
+                    .rfind(|(_, _, changed, _)| *changed <= version);
                 cases.push((
                     selector_request(address, None, Some(version), at_checkpoint),
                     bounded(at_most, at_checkpoint),
@@ -409,14 +414,12 @@ async fn get_object_lifecycle() {
         }
     }
 
-    // The bound does not fall back: at the checkpoint that created the object, its created
-    // version is visible, but a `max_version` that resolves to the mutation is `NotFound`.
+    // At the checkpoint that created the object, `max_version` set to the created version or to
+    // the mutation's version reads the created version: the mutation was written after that
+    // checkpoint, so it does not count, however far past the checkpoint the fullnode has indexed.
     let (create_cp, _, create_version, _) = changes[0];
     let (_, _, set_value_version, _) = changes[1];
-    for (max_version, expected) in [
-        (create_version, Some(create_version)),
-        (set_value_version, None),
-    ] {
+    for max_version in [create_version, set_value_version] {
         let request = selector_request(
             Address::from(object),
             None,
@@ -428,7 +431,7 @@ async fn get_object_lifecycle() {
             Address::from(object),
         );
         let outcome = single_outcome(client.get_object(request.clone()).await);
-        assert_outcome(outcome, &request, expected, &not_found);
+        assert_outcome(outcome, &request, Some(create_version), &not_found);
     }
 
     // Setting both `version` and `max_version` is invalid, and fails the whole batch.

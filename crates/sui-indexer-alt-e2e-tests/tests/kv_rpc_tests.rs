@@ -1885,9 +1885,9 @@ fn assert_not_found(read: &ObjectRead, message: &str, context: &str) {
 
 /// `max_version` reads resolve an object to its newest version at or below the bound, through
 /// creation, mutation, wrapping, unwrapping, and deletion, and are `NotFound` from a deletion or
-/// wrap until the object is unwrapped. `at_checkpoint` with `version` or `max_version` bounds the
-/// read to versions written by the end of the checkpoint, without falling back to an older
-/// version that was. `GetObject` and `BatchGetObjects` agree item by item.
+/// wrap until the object is unwrapped. `at_checkpoint` bounds a `version` read to a version
+/// written by the end of the checkpoint, and has a `max_version` read select among the versions
+/// written by then. `GetObject` and `BatchGetObjects` agree item by item.
 #[tokio::test]
 async fn test_get_object_max_version_and_checkpoint_bounds() {
     let mut cluster = list_api_cluster().await;
@@ -1909,29 +1909,29 @@ async fn test_get_object_max_version_and_checkpoint_bounds() {
         .expect("served height should be set");
     assert!(served_height >= lifecycle.delete_checkpoint);
 
-    // The expected outcome of each read, from the lifecycle's changes: `(checkpoint, version)` of
-    // the live change a read selects, kept only if it was made by the end of the bound.
+    // The expected outcome of each read, from the lifecycle's `(checkpoint, object, version,
+    // live)` changes: the version it returns, or `None` if it is `NotFound`.
     let changes = |id: ObjectID| {
         lifecycle
             .changes
             .iter()
             .filter(move |(_, changed, _, _)| *changed == id)
     };
-    let exact = |id: ObjectID, version: u64| {
+    // An exact version, kept only if it was made by the end of `at_checkpoint`.
+    let exact = |id: ObjectID, version: u64, at_checkpoint: Option<u64>| {
         changes(id)
             .find(|&&(_, _, changed, live)| live && changed == version)
-            .map(|&(checkpoint, _, version, _)| (checkpoint, version))
+            .filter(|&&(changed_at, ..)| at_checkpoint.is_none_or(|bound| changed_at <= bound))
+            .map(|&(_, _, version, _)| version)
     };
-    let at_most = |id: ObjectID, version: u64| {
+    // The newest version at or below `version` among those made by the end of `at_checkpoint`,
+    // if the object is live at it.
+    let at_most = |id: ObjectID, version: u64, at_checkpoint: Option<u64>| {
         changes(id)
+            .filter(|&&(changed_at, ..)| at_checkpoint.is_none_or(|bound| changed_at <= bound))
             .rfind(|&&(_, _, changed, _)| changed <= version)
             .filter(|&&(_, _, _, live)| live)
-            .map(|&(checkpoint, _, version, _)| (checkpoint, version))
-    };
-    let bounded = |selected: Option<(u64, u64)>, at_checkpoint: Option<u64>| {
-        selected
-            .filter(|&(changed_at, _)| at_checkpoint.is_none_or(|bound| changed_at <= bound))
-            .map(|(_, version)| version)
+            .map(|&(_, _, version, _)| version)
     };
 
     // Every version from just before creation to just after deletion, each read exactly and as a
@@ -1957,12 +1957,12 @@ async fn test_get_object_max_version_and_checkpoint_bounds() {
                     .unwrap_or_default();
                 cases.push((
                     object_request(id, Some(version), at_checkpoint),
-                    bounded(exact(id, version), at_checkpoint),
+                    exact(id, version, at_checkpoint),
                     format!("Object {id_string} with version {version}{at} not found"),
                 ));
                 cases.push((
                     max_version_request(id, version, at_checkpoint),
-                    bounded(at_most(id, version), at_checkpoint),
+                    at_most(id, version, at_checkpoint),
                     format!("Object {id_string} with version at most {version}{at} not found"),
                 ));
             }
@@ -1997,32 +1997,27 @@ async fn test_get_object_max_version_and_checkpoint_bounds() {
         assert_case(read, req, *expected, message, "BatchGetObjects");
     }
 
-    // The bound does not fall back: at the checkpoint that created the object, its created
-    // version is visible, but a `max_version` that resolves to the mutation is `NotFound`.
+    // At the checkpoint that created the object, `max_version` set to the created version or to
+    // the mutation's version reads the created version: the mutation was written after that
+    // checkpoint, so it does not count, however far past the checkpoint the server has indexed.
     let (create_checkpoint, _, create_version, _) = lifecycle.changes[0];
     let set_value_version = lifecycle
         .live_version_at(object, lifecycle.set_value_checkpoint)
         .unwrap();
-    let read = get_object_read(
-        &mut client,
-        max_version_request(object, create_version, Some(create_checkpoint)),
-    )
-    .await;
-    assert_object_found(&read, object, create_version, "created version at creation");
-    let read = get_object_read(
-        &mut client,
-        max_version_request(object, set_value_version, Some(create_checkpoint)),
-    )
-    .await;
-    assert_not_found(
-        &read,
-        &format!(
-            "Object {} with version at most {set_value_version} at checkpoint \
-             {create_checkpoint} not found",
-            object.to_canonical_string(true),
-        ),
-        "mutated version at creation",
-    );
+    assert!(lifecycle.set_value_checkpoint > create_checkpoint);
+    for max_version in [create_version, set_value_version] {
+        let read = get_object_read(
+            &mut client,
+            max_version_request(object, max_version, Some(create_checkpoint)),
+        )
+        .await;
+        assert_object_found(
+            &read,
+            object,
+            create_version,
+            &format!("max_version {max_version} at creation"),
+        );
+    }
 
     // Setting both `version` and `max_version` is invalid, and fails the whole batch.
     let both = || {
