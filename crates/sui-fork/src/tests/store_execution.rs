@@ -593,14 +593,16 @@ async fn test_availability_floor_below_the_fork_passes_through() {
     assert_eq!(store.get_lowest_available_checkpoint_objects().unwrap(), 10);
 }
 
-/// The fork's indexes load pre-fork packages as of the fork checkpoint, without the history before
-/// it, so checkpoint-pinned reads below the fork checkpoint are rejected even when the remote's
-/// retention reaches further back.
+/// The fork's indexes load pre-fork objects and packages as of the fork checkpoint, without the
+/// history before it, so checkpoint-pinned reads below the fork checkpoint are rejected even when
+/// the remote's retention reaches further back; at the fork checkpoint they are served.
 #[tokio::test]
 async fn test_checkpoint_pinned_reads_below_the_fork_checkpoint_are_rejected() {
     use sui_rpc_api::RpcService;
+    use sui_rpc_api::proto::sui::rpc::v2::GetObjectRequest;
     use sui_rpc_api::proto::sui::rpc::v2::GetPackageRequest;
     use sui_rpc_api::proto::sui::rpc::v2::get_package_request::Selector;
+    use sui_rpc_api::proto::sui::rpc::v2::ledger_service_server::LedgerService;
     use sui_rpc_api::proto::sui::rpc::v2::move_package_service_server::MovePackageService;
 
     let temp = tempfile::tempdir().expect("failed to create tempdir");
@@ -625,9 +627,14 @@ async fn test_checkpoint_pinned_reads_below_the_fork_checkpoint_are_rejected() {
         ),
         TransactionDigest::genesis_marker(),
     );
+    let coin = make_gas_object(
+        ObjectID::random(),
+        7,
+        Owner::AddressOwner(SuiAddress::random_for_testing_only()),
+    );
     store
         .local_store()
-        .restore_seed_objects(&[package])
+        .restore_seed_objects(&[package, coin.clone()])
         .unwrap();
     let service = RpcService::new(Arc::new(store));
     let below_floor = "requested data below earliest available; lowest available checkpoint is 100";
@@ -641,6 +648,27 @@ async fn test_checkpoint_pinned_reads_below_the_fork_checkpoint_are_rejected() {
         .unwrap_err();
     assert_eq!(error.code(), tonic::Code::OutOfRange);
     assert_eq!(error.message(), below_floor);
+
+    let mut request = GetObjectRequest::default();
+    request.object_id = Some(coin.id().to_string());
+    request.at_checkpoint = Some(fork_checkpoint - 1);
+    let error = service
+        .get_object(tonic::Request::new(request))
+        .await
+        .unwrap_err();
+    assert_eq!(error.code(), tonic::Code::OutOfRange);
+    assert_eq!(error.message(), below_floor);
+    let mut request = GetObjectRequest::default();
+    request.object_id = Some(coin.id().to_string());
+    request.at_checkpoint = Some(fork_checkpoint);
+    let object = service
+        .get_object(tonic::Request::new(request))
+        .await
+        .unwrap()
+        .into_inner()
+        .object
+        .unwrap();
+    assert_eq!(object.version, Some(7));
 }
 
 #[tokio::test]
