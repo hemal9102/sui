@@ -38,7 +38,7 @@ pub use mysten_common::assert_reachable_simtest;
 
 /// The minimum and maximum protocol versions supported by this build.
 const MIN_PROTOCOL_VERSION: u64 = 1;
-const MAX_PROTOCOL_VERSION: u64 = 141;
+const MAX_PROTOCOL_VERSION: u64 = 142;
 
 const TESTNET_USDC: &str =
     "0xa1ec7fc00a6f40db9693ad1415d0c193ad3906494428cf252621037bd7117e29::usdc::USDC";
@@ -433,7 +433,7 @@ const MAINNET_USDB: &str =
 //              Reject an overflowing x-coordinate in `secp256r1_ecrecover`.
 //              Configure explicit Move binary format encoding limits.
 //              Enable defer_owned_object_double_spend on all networks.
-//              Enable timestamp-based transaction expiration on devnet.
+// Version 142: Enable timestamp-based transaction expiration on devnet.
 
 #[derive(Copy, Clone, Debug, Hash, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
 pub struct ProtocolVersion(u64);
@@ -1372,8 +1372,8 @@ struct FeatureFlags {
     disable_id_leak_verifier: bool,
 
     // If true, `min_timestamp` and `max_timestamp` in `ValidDuring` and `Validity` expirations
-    // are accepted. Consensus drops a transaction before its `min_timestamp`, and a transaction
-    // scheduled after its `max_timestamp` fails with `TransactionExpired`.
+    // are accepted. Validators reject a transaction before its `min_timestamp` by their local
+    // clocks, and a transaction committed after its `max_timestamp` fails with `TransactionExpired`.
     #[serde(skip_serializing_if = "is_false")]
     enable_timestamp_transaction_expiration: bool,
 }
@@ -4988,6 +4988,8 @@ impl ProtocolConfig {
                     cfg.feature_flags.secp256r1_ecrecover_checks_x_below_p = true;
                     cfg.binary_format_limits_profile = Some(BinaryFormatLimitsProfile::V1);
                     cfg.feature_flags.defer_owned_object_double_spend = true;
+                }
+                142 => {
                     if chain != Chain::Mainnet && chain != Chain::Testnet {
                         cfg.feature_flags.enable_timestamp_transaction_expiration = true;
                     }
