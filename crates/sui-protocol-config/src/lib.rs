@@ -1372,9 +1372,8 @@ struct FeatureFlags {
     disable_id_leak_verifier: bool,
 
     // If true, `min_timestamp` and `max_timestamp` in `ValidDuring` and `Validity` expirations
-    // are accepted. The consensus handler drops a transaction whose commit timestamp is outside
-    // the window when the transaction is first sequenced, and execution aborts a deferred
-    // transaction whose assigned Clock is outside the window.
+    // are accepted. Consensus drops a transaction before its `min_timestamp`, and a transaction
+    // scheduled after its `max_timestamp` fails with `TransactionExpired`.
     #[serde(skip_serializing_if = "is_false")]
     enable_timestamp_transaction_expiration: bool,
 }
