@@ -99,8 +99,10 @@ pub fn parse_nitro_attestation(
     is_upgraded_parsing: bool,
     include_all_nonzero_pcrs: bool,
     always_include_required_pcrs: bool,
+    skip_nitro_header_duplicate_checks: bool,
 ) -> SuiResult<(Vec<u8>, Vec<u8>, AttestationDocument)> {
-    let cose_sign1 = CoseSign1::parse_and_validate(attestation_bytes)?;
+    let cose_sign1 =
+        CoseSign1::parse_and_validate(attestation_bytes, skip_nitro_header_duplicate_checks)?;
     let doc = AttestationDocument::parse_payload(
         &cose_sign1.payload,
         is_upgraded_parsing,
@@ -283,11 +285,14 @@ impl<'de> Deserialize<'de> for CoseSign1 {
 
 impl CoseSign1 {
     /// Parse CBOR bytes into struct. Adapted from <https://github.com/awslabs/aws-nitro-enclaves-cose/blob/main/src/sign.rs>
-    pub fn parse_and_validate(bytes: &[u8]) -> Result<Self, NitroAttestationVerifyError> {
+    pub fn parse_and_validate(
+        bytes: &[u8],
+        skip_nitro_header_duplicate_checks: bool,
+    ) -> Result<Self, NitroAttestationVerifyError> {
         let tagged_value: ciborium::value::Value = ciborium::de::from_reader(bytes)
             .map_err(|e| NitroAttestationVerifyError::InvalidCoseSign1(e.to_string()))?;
 
-        let (tag, value) = match tagged_value {
+        let (tag, mut value) = match tagged_value {
             ciborium::value::Value::Tag(tag, box_value) => (Some(tag), *box_value),
             other => (None, other),
         };
@@ -302,6 +307,18 @@ impl CoseSign1 {
             }
         }
 
+        if skip_nitro_header_duplicate_checks {
+            // The unsigned header is unused; clear it.
+            let Value::Array(fields) = &mut value else {
+                return Err(NitroAttestationVerifyError::InvalidCoseSign1(
+                    "expected a COSE_Sign1 array".to_string(),
+                ));
+            };
+            if let Some(unprotected) = fields.get_mut(1) {
+                *unprotected = Value::Map(vec![]);
+            }
+        }
+
         // Create a buffer for serialization
         let mut buf = Vec::new();
 
@@ -313,9 +330,11 @@ impl CoseSign1 {
         let cosesign1: Self = ciborium::de::from_reader(&buf[..])
             .map_err(|e| NitroAttestationVerifyError::InvalidCoseSign1(e.to_string()))?;
 
-        // Validate protected header
-        let _: HeaderMap = ciborium::de::from_reader(cosesign1.protected.as_slice())
-            .map_err(|e| NitroAttestationVerifyError::InvalidCoseSign1(e.to_string()))?;
+        // validate_header below already requires the protected header to be exactly {1: -35}.
+        if !skip_nitro_header_duplicate_checks {
+            let _: HeaderMap = ciborium::de::from_reader(cosesign1.protected.as_slice())
+                .map_err(|e| NitroAttestationVerifyError::InvalidCoseSign1(e.to_string()))?;
+        }
 
         cosesign1.validate_header()?;
         Ok(cosesign1)
