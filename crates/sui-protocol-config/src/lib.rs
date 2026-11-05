@@ -1373,7 +1373,8 @@ struct FeatureFlags {
 
     // If true, `min_timestamp` and `max_timestamp` in `ValidDuring` and `Validity` expirations
     // are accepted. Validators reject a transaction before its `min_timestamp` by their local
-    // clocks, and a transaction committed after its `max_timestamp` fails with `TransactionExpired`.
+    // clocks, and a transaction scheduled by a commit after its `max_timestamp` fails with
+    // `TransactionExpired`.
     #[serde(skip_serializing_if = "is_false")]
     enable_timestamp_transaction_expiration: bool,
 }
