@@ -329,7 +329,8 @@ pub(crate) fn parse_http_https<'a, T: Iterator<Item = Protocol<'a>>>(
     match protocols.next() {
         Some(Protocol::Http) => Ok("http"),
         Some(Protocol::Https) => Ok("https"),
-        _ => Ok("http"),
+        None => Ok("http"),
+        Some(other) => Err(eyre!("expected http, https, or end of address, found {other}")),
     }
 }
 
@@ -530,5 +531,22 @@ mod test {
         // But it doesn't round-trip in the human readable format
         let s = addr.to_string();
         assert!(s.parse::<Multiaddr>().is_err());
+    }
+
+    #[test]
+    fn test_rejects_non_http_protocols() {
+        use super::{parse_dns, parse_ip4};
+
+        let ws_addr = "/ip4/127.0.0.1/tcp/80/ws".parse::<Multiaddr>().unwrap();
+        assert!(parse_ip4(&ws_addr).is_err());
+
+        let ws_dns = "/dns/example.com/tcp/443/ws".parse::<Multiaddr>().unwrap();
+        assert!(parse_dns(&ws_dns).is_err());
+
+        let default_ip4 = "/ip4/127.0.0.1/tcp/80".parse::<Multiaddr>().unwrap();
+        assert_eq!(parse_ip4(&default_ip4).unwrap().1, "http");
+
+        let https_dns = "/dns/example.com/tcp/443/https".parse::<Multiaddr>().unwrap();
+        assert_eq!(parse_dns(&https_dns).unwrap().2, "https");
     }
 }
